@@ -1,7 +1,7 @@
-# AGENTS.md -- Custom Wheel Scale
+# AGENTS.md -- Wheel Size Unlimited
 
 A native Motor Town plugin: one DLL loaded by
-[Plugin Loader](https://github.com/qxZap/mt-plugin-loader). Source is `plugins/custom_wheel_scale.cpp`.
+[Plugin Loader](https://github.com/qxZap/mt-plugin-loader). Source is `plugins/wheel_size_unlimited.cpp`.
 `include/` is a copy of the loader's headers; refresh it from mt-plugin-loader when the
 api version changes.
 

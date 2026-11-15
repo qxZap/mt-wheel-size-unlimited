@@ -1,5 +1,6 @@
-// Custom Wheel Scale -- wheel radius and width tuning, and any wheel on any vehicle, as
-// plugins\mt_plugin_CustomWheelScale.dll.
+﻿// Wheel Size Unlimited -- wheel radius and width tuning, and any wheel on any vehicle, as
+// plugins\mt_plugin_WheelSizeUnlimited.dll. Takes the name of the earlier Wheel Size Unlimited pak
+// (zzzProxyWheelSizeUnlimited_P) it replaces; was Custom Wheel Scale until 2026-11-13.
 //
 // Range: the game keeps one table of tuning params, {default, min, max, step}, 0.80 - 1.20
 // for both. The garage spin box is built from it and every clamp reads it, so raising
@@ -19,8 +20,8 @@
 //
 // Tunings of every vehicle are logged on change, so a clamp shows up.
 //
-// Settings: Binaries\Win64\custom_wheel_scale.ini, [WheelScale] Min / Max (0.1 / 4.0, monster trucks),
-// WidthMin / WidthMax (0.1 / 3.0), Step (0.01, as vanilla).
+// Settings: plugins\wheel_size_unlimited.ini (custom_wheel_scale.ini is moved over), [WheelScale] Min / Max (0.1 / 2.0),
+// WidthMin / WidthMax (0.1 / 1.7), Step (0.01, as vanilla). The user, 2026-11-13: size tops out at 2, width at 1.7.
 //
 // shortcut: single player / host -- on a client the server owns Net_Tunings and its own
 // table, so a vanilla server keeps 0.80 - 1.20.
@@ -39,6 +40,8 @@ static bool alive(const Ref& r) { return r.ptr && api->object(r.index) == r.ptr;
 
 static uintptr_t cVeh;
 static int oId = -1, oTunings = -1, tParam = -1, tTarget = -1, tValue = -1, tSize = 0;
+static int oScreenVeh = -1;     // GarageChildWidget.Vehicle: the car on the tuning screen
+static uintptr_t cTuneScreen;   // GarageTuningWidget
 
 static uintptr_t cTable, sPart;
 static int oGates[6], oWheelMesh[2];  // VehicleRowGameplayTagQuery's two arrays are in oGates
@@ -66,16 +69,30 @@ static std::string tunings(uintptr_t v) {
     return out;
 }
 
+// No wheel size on a boat (the user, 2026-11-13: its "wheels" are the propellers): a radius or width a boat already
+// carries goes back to 1.0, and the tuning screen builds no wheel lines for one (bothLines).
+static void untuneBoat(uintptr_t v) {
+    uintptr_t d = get<uintptr_t>(v + oTunings); int n = get<int>(v + oTunings + 8);
+    for (int i = 0; d && i < n && i < 32; i++) {
+        uintptr_t e = d + (uintptr_t)i * tSize;
+        if (get<uint8_t>(e + tParam) > 1 || get<float>(e + tValue) == 1.0f) continue;
+        float one = 1.0f;
+        wr(e + tValue, &one, 4);
+        MT_LOG("boat %s: wheel tuning #%d back to 1.0", objName(classOf(v)).c_str(), get<int>(e + tTarget));
+    }
+}
+
 static void tick(void*) {
     std::lock_guard<std::mutex> g(lock);
     for (auto& r : vehicles) {
         if (!alive(r) || get<int>(r.ptr + oTunings + 8) == 0) continue;
+        if (isBoatVehicle(r.ptr)) untuneBoat(r.ptr);
         std::string t = tunings(r.ptr);
         if (lastLog[r.ptr] == t) continue;
         lastLog[r.ptr] = t;
         MT_LOG("tunings %s: %s", objName(classOf(r.ptr)).c_str(), t.c_str());
         // The log restarts with the game. This one keeps going, to compare a car across sessions.
-        if (FILE* f = loggingOn() ? _wfopen((gameDir() + L"plugins\\logs\\CustomWheelScale\\wheel_history.log").c_str(), L"a") : nullptr) {
+        if (FILE* f = loggingOn() ? _wfopen((gameDir() + L"plugins\\logs\\WheelSizeUnlimited\\wheel_history.log").c_str(), L"a") : nullptr) {
             SYSTEMTIME now;
             GetLocalTime(&now);
             long long id = oId >= 0 ? get<long long>(r.ptr + oId) : 0;
@@ -117,6 +134,8 @@ using LineFn = void (*)(uintptr_t screen, uint8_t param, int index, int target);
 static LineFn buildLine;
 
 static void bothLines(uintptr_t screen, uint8_t param, int index, int target) {
+    if (oScreenVeh >= 0 && cTuneScreen && screen && api->is_a(classOf(screen), cTuneScreen)
+        && isBoatVehicle(get<uintptr_t>(screen + oScreenVeh))) return;  // a boat: no wheel lines at all
     buildLine(screen, param, index, target);
     if (param == 0) buildLine(screen, 1, index, target);
 }
@@ -157,6 +176,17 @@ static int unlockTable(uintptr_t t) {
     for (int j = 0; j < num; j++) {  // TSetElement: FName, uint8*, hash links = 24 bytes
         uintptr_t row = get<uintptr_t>(el + 24ull * j + 8);
         if (!row) continue;
+        {  // Arini's propellers (2026-11-13: only the fitted Bronze prop is offered): which mesh slots each one fills
+            static std::map<std::string, bool> told;
+            std::string key = fname(el + 24ull * j);
+            if (key.find("BoatProp") != std::string::npos && !told[key]) {
+                told[key] = true;
+                static const char* kSlot[7] = {"Left", "Right", "DRWLeft", "DRWRight", "RearLeft", "RearRight", "Quad"};
+                std::string have;
+                for (int k = 0; k < 7; k++) if (get<uintptr_t>(row + oSlot[k])) have += std::string(have.empty() ? "" : " ") + kSlot[k];
+                MT_LOG("prop row %s fills: %s", key.c_str(), have.empty() ? "(no mesh slot)" : have.c_str());
+            }
+        }
         bool any = false;
         for (int o : oSlot) any = any || get<uintptr_t>(row + o);
         if (!any) continue;
@@ -173,6 +203,18 @@ static int unlockTable(uintptr_t t) {
         done += hit;
     }
     return done;
+}
+
+// The rows are edited on the game thread (2026-11-12 crash hunt): from the plugin thread a write could land in a row the
+// game had just freed while rebuilding its tables at load. The walk that finds the tables stays on the plugin thread.
+static std::mutex tablesLock;
+static std::vector<Ref> tablesToSweep;
+static void sweepTables(void*) {
+    std::vector<Ref> t;
+    { std::lock_guard<std::mutex> g(tablesLock); t.swap(tablesToSweep); }
+    int unlocked = 0;
+    for (auto& r : t) if (api->object(r.index) == r.ptr) unlocked += unlockTable(r.ptr);
+    if (unlocked) MT_LOG("wheels: gates cleared / empty mesh slots filled on %d rows", unlocked);
 }
 
 static bool findGates() {
@@ -194,11 +236,11 @@ static bool findGates() {
 }
 
 static DWORD WINAPI run(LPVOID) {
-    MT_LOG("Custom Wheel Scale loaded");
+    MT_LOG("Wheel Size Unlimited loaded");
     addWidthLines();
-    struct { const wchar_t* key; double v; } cfg[] = {{L"Min", 0.1}, {L"Max", 4.0}, {L"WidthMin", 0.1}, {L"WidthMax", 3.0}, {L"Step", 0.01}};
+    struct { const wchar_t* key; double v; } cfg[] = {{L"Min", 0.1}, {L"Max", 2.0}, {L"WidthMin", 0.1}, {L"WidthMax", 1.7}, {L"Step", 0.01}};
     for (auto& c : cfg) {
-        c.v = iniNum(L"custom_wheel_scale.ini", L"WheelScale", c.key, c.v);
+        c.v = iniNum(L"wheel_size_unlimited.ini", L"WheelScale", c.key, c.v);
         MT_LOG("setting %ls = %g", c.key, c.v);
     }
     for (int i = 0; i < 2; i++) { range[i][0] = (float)cfg[i * 2].v; range[i][1] = (float)cfg[i * 2 + 1].v; }
@@ -213,6 +255,8 @@ static DWORD WINAPI run(LPVOID) {
     cVeh = api->find_object("Class", "MTVehicle", "/Script/MotorTown");
     uintptr_t sEntry = api->find_object("ScriptStruct", "MTTuningEntry", "/Script/MotorTown");
     oTunings = off(cVeh, "Net_Tunings");
+    cTuneScreen = api->find_object("Class", "GarageTuningWidget", "/Script/MotorTown");
+    if (uintptr_t cChild = api->find_object("Class", "GarageChildWidget", "/Script/MotorTown")) oScreenVeh = off(cChild, "Vehicle");
     oId = off(cVeh, "Net_VehicleId");
     tParam = off(sEntry, "Param"); tTarget = off(sEntry, "TargetId"); tValue = off(sEntry, "Value");
     tSize = sEntry ? get<int>(sEntry + L().struct_child_props + 8) : 0;  // PropertiesSize follows ChildProperties
@@ -221,15 +265,17 @@ static DWORD WINAPI run(LPVOID) {
     for (int beat = 0;; beat++) {
         bool sweep = gates && beat % 30 == 0;  // a table can load later than the last pass
         if (!sweep && !loggingOn()) { Sleep(1000); continue; }
-        int unlocked = 0;
-        std::vector<Ref> v;
+        std::vector<Ref> v, tables;
         for (int i = 0, n = api->num_objects(); i < n; i++) {
             uintptr_t o = api->object(i);
             if (!o || isCDO(o)) continue;
             if (api->is_a(classOf(o), cVeh)) v.push_back({i, o});
-            else if (sweep && api->is_a(classOf(o), cTable)) unlocked += unlockTable(o);
+            else if (sweep && api->is_a(classOf(o), cTable)) tables.push_back({i, o});
         }
-        if (unlocked) MT_LOG("wheels: gates cleared / empty mesh slots filled on %d rows", unlocked);
+        if (!tables.empty()) {
+            { std::lock_guard<std::mutex> g(tablesLock); tablesToSweep.swap(tables); }
+            api->run_on_game_thread(sweepTables, nullptr);
+        }
         { std::lock_guard<std::mutex> g(lock); vehicles.swap(v); }
         if (api->game_thread_ready()) api->run_on_game_thread(tick, nullptr);
         Sleep(1000);
@@ -239,7 +285,8 @@ static DWORD WINAPI run(LPVOID) {
 extern "C" __declspec(dllexport) int PluginInit(const MtApi* a) {
     if (!attach(a)) return 1;
     MoveFileW((gameDir() + L"wheel_scale.ini").c_str(), (gameDir() + L"custom_wheel_scale.ini").c_str());  // settings from before the rename
-    if (iniDisabled(L"custom_wheel_scale.ini")) return 0;
+    MoveFileW(iniPath(L"custom_wheel_scale.ini").c_str(), iniPath(L"wheel_size_unlimited.ini").c_str());  // settings from before this rename
+    if (iniDisabled(L"wheel_size_unlimited.ini")) return 0;
     CloseHandle(CreateThread(nullptr, 0, run, nullptr, 0, nullptr));
     return 0;
 }
